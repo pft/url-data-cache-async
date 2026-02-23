@@ -1,81 +1,79 @@
-const shasum = require("shasum");
+const crypto = require("crypto");
 const osPaths = require("os-paths");
 const fsp = require("fs/promises");
 const path = require("path");
-const util = require("util");
-const rimraf = require("rimraf");
 
 module.exports = function (application = "default") {
+  // Helper to generate hash without external 'shasum' dependency
+  function getHash(str) {
+    return crypto.createHash("sha1").update(str).digest("hex");
+  }
+
   function calculateLocations(link) {
     const paths = osPaths(application);
     const url = new URL(link);
-    const cas = shasum(url.toString());
-    const hostPath = url.hostname.replace(/[^a-zA-Z0-9-]/, "_");
-    const basePath = path.resolve(paths.cache + `/cached/${hostPath}`);
-    const fileName = cas + path.extname(url.pathname);
-    const metaName = cas + ".json";
-    const dataPath = path.join(basePath, fileName);
-    const metaPath = path.join(basePath, metaName);
+    const cas = getHash(url.toString());
+
+    const hostPath = url.hostname.replace(/[^a-zA-Z0-9-]/g, "_");
+    const basePath = path.resolve(paths.cache, "cached", hostPath);
+
     return {
       basePath,
-      dataPath,
-      metaPath,
+      dataPath: path.join(basePath, `${cas}${path.extname(url.pathname)}`),
+      metaPath: path.join(basePath, `${cas}.json`),
     };
   }
 
-  function calculateExpirationDate(duration = 0) {
-    const expirationDate = new Date();
-    expirationDate.setSeconds(expirationDate.getSeconds() + duration);
-    return expirationDate.toString();
-  }
-
   async function info(url) {
-    const { basePath, dataPath, metaPath } = calculateLocations(url);
+    const locs = calculateLocations(url);
     try {
-      // May throw:
-      await fsp.access(dataPath, fsp.constants.R_OK);
-      // May throw:
-      const { expiration } = JSON.parse(await fsp.readFile(metaPath));
-      const currentDate = new Date();
-      const dateOfExpiration = new Date(expiration);
-      const expired = currentDate > dateOfExpiration;
-      return { url, dataPath, metaPath, basePath, expired, exists: true };
-    } catch (e) {
-      // Yes, the file itself might exist, and metafile may have
-      // caused an error. But let's just treat that as non-existing.
-      return {
-        url,
-        dataPath,
-        metaPath,
-        basePath,
-        expired: "n/a",
-        exists: false,
-      };
+      // Check data file and read meta in parallel
+      const [metaRaw] = await Promise.all([
+        fsp.readFile(locs.metaPath, "utf8"),
+        fsp.access(locs.dataPath, fsp.constants.R_OK),
+      ]);
+
+      const { expiration } = JSON.parse(metaRaw);
+      const expired = Date.now() > new Date(expiration).getTime();
+
+      return { ...locs, url, expired, exists: true };
+    } catch {
+      return { ...locs, url, expired: "n/a", exists: false };
     }
   }
 
   async function put(url, data, duration = 0) {
-    const expiration = calculateExpirationDate(duration);
     const { basePath, dataPath, metaPath } = calculateLocations(url);
+    const expiration = new Date(Date.now() + duration * 1000).toISOString();
+
     await fsp.mkdir(basePath, { recursive: true });
-    await fsp.writeFile(metaPath, JSON.stringify({ expiration, url }, null, 2));
-    await fsp.writeFile(dataPath, data);
-    return;
+
+    // Write meta and data in parallel
+    await Promise.all([
+      fsp.writeFile(metaPath, JSON.stringify({ expiration, url }, null, 2)),
+      fsp.writeFile(dataPath, data),
+    ]);
   }
 
   async function drop(url) {
     const { basePath, dataPath, metaPath } = calculateLocations(url);
-    await Promise.all([fsp.unlink(dataPath), fsp.unlink(metaPath)]);
-    const entries = await fsp.readdir(basePath);
-    if (entries.length === 0) {
-      await util.promisify(rimraf)(basePath);
+
+    // 'force: true' prevents errors if files don't exist
+    await Promise.all([
+      fsp.rm(dataPath, { force: true }),
+      fsp.rm(metaPath, { force: true }),
+    ]);
+
+    // Cleanup directory if empty
+    try {
+      const entries = await fsp.readdir(basePath);
+      if (entries.length === 0) {
+        await fsp.rm(basePath, { recursive: true, force: true });
+      }
+    } catch {
+      // Ignore if directory was already deleted or isn't accessible
     }
-    return null;
   }
 
-  return {
-    drop,
-    info,
-    put,
-  };
+  return { drop, info, put };
 };

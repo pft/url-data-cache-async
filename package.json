@@ -1,6 +1,6 @@
 {
   "name": "url-data-cache-async",
-  "version": "1.22.0",
+  "version": "1.23.0",
   "description": "Cache data from a url request.",
   "main": "index.js",
   "scripts": {
@@ -19,8 +19,6 @@
   },
   "homepage": "https://github.com/pft/url-data-cache-async#readme",
   "dependencies": {
-    "os-paths": "^3.0.2",
-    "rimraf": "^2.6.3",
-    "shasum": "^1.0.2"
+    "os-paths": "^3.0.2"
   }
 }
